@@ -20,10 +20,10 @@
 module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
   version = "3.7.0"
-  name                  = "terraform-demo-vpc"
+  name                  = local.cluster_name
   cidr                  = "10.0.0.0/16"
   secondary_cidr_blocks = ["100.64.0.0/16"]
-  azs                   = ["${local.region}a", "${local.region}b", "${local.region}c"]
+  azs                   = ["${local.region}a", "${local.region}c", "${local.region}d"]
   private_subnets       = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
   intra_subnets         = [ "100.64.1.0/24", "100.64.2.0/24", "100.64.3.0/24"]
   public_subnets        = ["10.0.4.0/24", "10.0.5.0/24", "10.0.6.0/24"]
@@ -36,6 +36,7 @@ resource "aws_nat_gateway" "private_nat" {
   connectivity_type = "private"
   subnet_id         = module.vpc.private_subnets[0]
 }
+
 resource "aws_route" "intra_subnets_default_gateway" {
   route_table_id            = module.vpc.intra_route_table_ids[0]
   destination_cidr_block    = "0.0.0.0/0"
@@ -47,11 +48,40 @@ resource "aws_route" "intra_subnets_default_gateway" {
 module "eks" {
   source          = "terraform-aws-modules/eks/aws"
   cluster_name    = local.cluster_name
-  cluster_version = "1.21"
+  cluster_version = var.eks_version
   subnet_ids      = module.vpc.private_subnets
   vpc_id          = module.vpc.vpc_id
   cluster_enabled_log_types = [ "audit", "api", "authenticator", "controllerManager", "scheduler" ]
+
+  eks_managed_node_group_defaults = {
+    ami_type       = "AL2_x86_64"
+    instance_types = ["m5.large"]
+
+    attach_cluster_primary_security_group = true
+    //vpc_security_group_ids                = [aws_security_group.additional.id]
+  }
+
+  eks_managed_node_groups = {
+    //blue = {}
+    green = {
+      min_size     = 1
+      max_size     = 10
+      desired_size = 1
+
+      instance_types = ["m5.large"]
+      capacity_type  = "SPOT"
+
+      update_config = {
+        max_unavailable_percentage = 50 # or set `max_unavailable`
+      }
+    }
+  }
 }
+
+data "aws_eks_cluster_auth" "this" {
+  name = local.cluster_name
+}
+
 
 # STEP 3: Configure CNI custom network 
 resource "null_resource" "cni_patch" {
@@ -63,6 +93,9 @@ resource "null_resource" "cni_patch" {
   }
   provisioner "local-exec" {
     environment = {
+      CLUSTER_ENDPOINT = module.eks.cluster_endpoint
+      CLUSTER_CERT = module.eks.cluster_certificate_authority_data
+      CLUSTER_AUTH_TOKEN = data.aws_eks_cluster_auth.this.token
       CLUSTER_NAME = self.triggers.cluster_name
       NODE_SG      = self.triggers.node_sg
       SUBNETS      = self.triggers.intra_subnets
@@ -75,85 +108,113 @@ resource "null_resource" "cni_patch" {
   ]
 }
 
-# STEP 4: Create managed node group
-resource "aws_eks_node_group" "default" {
-  cluster_name  = local.cluster_name
-  node_group_name = "${local.cluster_name}-node-group-default"
-  node_role_arn   = aws_iam_role.eks_cluster_node_role.arn
-  subnet_ids      = module.vpc.private_subnets
-  instance_types  = [ "c5.large" ]
-  scaling_config {
-    desired_size = 1
-    max_size     = 2
-    min_size     = 1
+resource "helm_release" "eni-config" {
+  for_each = { for k, v in module.vpc.intra_subnets: k => v }
+
+
+  name = each.key
+  chart = "${path.module}/helm/eni-config"
+  version = "1.0.0"
+  namespace = "default"
+  set {
+    name = "name"
+    #value = each.key
+    value = each.value
+    type = "string"
   }
-  depends_on = [
-    null_resource.cni_patch,
-    module.vpc
-  ]
+
+  set {
+    name = "subnet"
+    value = each.value
+    type = "string"
+  }
+
+  set {
+    name = "nodeSg"
+    value = module.eks.node_security_group_id
+    type = "string"
+  }
 }
+
+# STEP 4: Create managed node group
+# resource "aws_eks_node_group" "default" {
+#   cluster_name  = local.cluster_name
+#   node_group_name = "${local.cluster_name}-node-group-default"
+#   node_role_arn   = aws_iam_role.eks_cluster_node_role.arn
+#   subnet_ids      = module.vpc.private_subnets
+#   instance_types  = [ "c5.large" ]
+#   scaling_config {
+#     desired_size = 1
+#     max_size     = 2
+#     min_size     = 1
+#   }
+#   depends_on = [
+#     null_resource.cni_patch,
+#     module.vpc
+#   ]
+# }
 
 # STEP 5: Configure security group policy
-resource "null_resource" "sg_policy" {
-  triggers = {
-    node_group    = aws_eks_node_group.default.id
-    cluster_name  = local.cluster_name
-    sg       = aws_security_group.example_sg.id
-    content       = file("${path.module}/scripts/network.sh")
-  }
-  provisioner "local-exec" {
-    environment = {
-      CLUSTER_NAME   = self.triggers.cluster_name
-      SECURITY_GROUP = self.triggers.sg
-    }
-    command     = "${path.cwd}/scripts/sg-policy.sh"
-    interpreter = ["bash"]
-  }
-  depends_on = [
-    aws_eks_node_group.default,
-    aws_security_group.example_sg,
-    kubernetes_namespace.example,
-    module.vpc
-  ]
-}
+# resource "null_resource" "sg_policy" {
+#   triggers = {
+#     node_group    = aws_eks_node_group.default.id
+#     cluster_name  = local.cluster_name
+#     sg       = aws_security_group.example_sg.id
+#     content       = file("${path.module}/scripts/network.sh")
+#   }
+#   provisioner "local-exec" {
+#     environment = {
+#       CLUSTER_NAME   = self.triggers.cluster_name
+#       SECURITY_GROUP = self.triggers.sg
+#     }
+#     command     = "${path.cwd}/scripts/sg-policy.sh"
+#     interpreter = ["bash"]
+#   }
+#   depends_on = [
+#     aws_eks_node_group.default,
+#     aws_security_group.example_sg,
+#     kubernetes_namespace.example,
+#     module.vpc
+#   ]
+# }
 
 # STEP 6: Launch an example deployment
-resource "kubernetes_namespace" "example" {
-  metadata {
-    name = "test-namespace"
-  }
-}
-resource "kubernetes_deployment" "example" {
-  metadata {
-    name = "deployment-example"
-    namespace = "test-namespace"
-    labels = {
-      test = "MyExampleApp"
-    }
-  }
-  spec {
-    replicas = 2
-    selector {
-      match_labels = {
-        test = "MyExampleApp"
-      }
-    }
-    template {
-      metadata {
-        labels = {
-          test = "MyExampleApp"
-          role = "test-role"
-        }
-      }
-      spec {
-        container {
-          image = "nginx:latest"
-          name  = "example"
-        }
-      }
-    }
-  }
-  depends_on = [
-    null_resource.sg_policy
-  ]
-}
+# resource "kubernetes_namespace" "example" {
+#   metadata {
+#     name = "test-namespace"
+#   }
+# }
+# resource "kubernetes_deployment" "example" {
+#   metadata {
+#     name = "deployment-example"
+#     namespace = "test-namespace"
+#     labels = {
+#       test = "MyExampleApp"
+#     }
+#   }
+#   spec {
+#     replicas = 2
+#     selector {
+#       match_labels = {
+#         test = "MyExampleApp"
+#       }
+#     }
+#     template {
+#       metadata {
+#         labels = {
+#           test = "MyExampleApp"
+#           role = "test-role"
+#         }
+#       }
+#       spec {
+#         container {
+#           image = "nginx:latest"
+#           name  = "example"
+#         }
+#       }
+#     }
+#   }
+#   depends_on = [
+#     null_resource.sg_policy
+#   ]
+# }

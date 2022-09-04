@@ -1,4 +1,4 @@
 locals {
-  cluster_name = "CNICustomNetworkDemoEKS"
-  region       = "ap-southeast-2"
+  cluster_name = "toyamagu-eks-cluster"
+  region       = "ap-northeast-1"
 }
