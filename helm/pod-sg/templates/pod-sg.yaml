@@ -1,0 +1,12 @@
+apiVersion: vpcresources.k8s.aws/v1beta1
+kind: SecurityGroupPolicy
+metadata:
+  name: {{ .Values.name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml .Values.matchLabels | nindent 8 }}
+  securityGroups:
+    groupIds:
+      - {{ .Values.sgId }}

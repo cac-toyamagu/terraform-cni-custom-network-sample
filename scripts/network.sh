@@ -1,9 +1,6 @@
 #!/bin/bash
 
-touch "test"
 KUBE_CONFIG="$(mktemp)"
-# aws eks update-kubeconfig --name "${CLUSTER_NAME}" --kubeconfig "${KUBE_CONFIG}"
-
 cat > $KUBE_CONFIG <<EOF
 apiVersion: v1
 kind: Config
@@ -24,17 +21,10 @@ users:
     token: ${CLUSTER_AUTH_TOKEN}
 EOF
 
-# cat >/tmp/ca.crt <<EOF
-# ${base64decode(data.aws_eks_cluster.cluster.certificate_authority[0].data)}
-# EOF
+# Download kubectl
+curl -LO https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl && chmod +x ./kubectl
 
-# curl -LO https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl && chmod +x ./kubectl
-
-# # kubectl auth
-# KUBE_CONFIG="$(mktemp)"
-# aws eks update-kubeconfig --name "${CLUSTER_NAME}" --kubeconfig "${KUBE_CONFIG}"
-
-# # CNI env configurations
+# CNI env configurations
 kubectl --kubeconfig "${KUBE_CONFIG}" set env daemonset aws-node -n kube-system AWS_VPC_K8S_CNI_CUSTOM_NETWORK_CFG=true
 kubectl --kubeconfig "${KUBE_CONFIG}" set env daemonset aws-node -n kube-system ENI_CONFIG_LABEL_DEF=topology.kubernetes.io/zone
 

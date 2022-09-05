@@ -18,14 +18,14 @@
 
 # STEP 1: Create VPC with public, private and intra subnets
 module "vpc" {
-  source  = "terraform-aws-modules/vpc/aws"
-  version = "3.7.0"
+  source                = "terraform-aws-modules/vpc/aws"
+  version               = "3.7.0"
   name                  = local.cluster_name
   cidr                  = "10.0.0.0/16"
   secondary_cidr_blocks = ["100.64.0.0/16"]
   azs                   = ["${local.region}a", "${local.region}c", "${local.region}d"]
   private_subnets       = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
-  intra_subnets         = [ "100.64.1.0/24", "100.64.2.0/24", "100.64.3.0/24"]
+  intra_subnets         = ["100.64.1.0/24", "100.64.2.0/24", "100.64.3.0/24"]
   public_subnets        = ["10.0.4.0/24", "10.0.5.0/24", "10.0.6.0/24"]
   enable_nat_gateway    = true
   single_nat_gateway    = true
@@ -38,20 +38,20 @@ resource "aws_nat_gateway" "private_nat" {
 }
 
 resource "aws_route" "intra_subnets_default_gateway" {
-  route_table_id            = module.vpc.intra_route_table_ids[0]
-  destination_cidr_block    = "0.0.0.0/0"
-  nat_gateway_id            = aws_nat_gateway.private_nat.id
-  depends_on                = [aws_nat_gateway.private_nat]
+  route_table_id         = module.vpc.intra_route_table_ids[0]
+  destination_cidr_block = "0.0.0.0/0"
+  nat_gateway_id         = aws_nat_gateway.private_nat.id
+  depends_on             = [aws_nat_gateway.private_nat]
 }
 
 # STEP 2: Create EKS cluster 
 module "eks" {
-  source          = "terraform-aws-modules/eks/aws"
-  cluster_name    = local.cluster_name
-  cluster_version = var.eks_version
-  subnet_ids      = module.vpc.private_subnets
-  vpc_id          = module.vpc.vpc_id
-  cluster_enabled_log_types = [ "audit", "api", "authenticator", "controllerManager", "scheduler" ]
+  source                    = "terraform-aws-modules/eks/aws"
+  cluster_name              = local.cluster_name
+  cluster_version           = var.eks_version
+  subnet_ids                = module.vpc.private_subnets
+  vpc_id                    = module.vpc.vpc_id
+  cluster_enabled_log_types = ["audit", "api", "authenticator", "controllerManager", "scheduler"]
 
   eks_managed_node_group_defaults = {
     ami_type       = "AL2_x86_64"
@@ -93,12 +93,12 @@ resource "null_resource" "cni_patch" {
   }
   provisioner "local-exec" {
     environment = {
-      CLUSTER_ENDPOINT = module.eks.cluster_endpoint
-      CLUSTER_CERT = module.eks.cluster_certificate_authority_data
+      CLUSTER_ENDPOINT   = module.eks.cluster_endpoint
+      CLUSTER_CERT       = module.eks.cluster_certificate_authority_data
       CLUSTER_AUTH_TOKEN = data.aws_eks_cluster_auth.this.token
-      CLUSTER_NAME = self.triggers.cluster_name
-      NODE_SG      = self.triggers.node_sg
-      SUBNETS      = self.triggers.intra_subnets
+      CLUSTER_NAME       = self.triggers.cluster_name
+      NODE_SG            = self.triggers.node_sg
+      SUBNETS            = self.triggers.intra_subnets
     }
     command     = "${path.cwd}/scripts/network.sh"
     interpreter = ["bash"]
@@ -109,32 +109,58 @@ resource "null_resource" "cni_patch" {
 }
 
 resource "helm_release" "eni-config" {
-  for_each = { for k, v in module.vpc.intra_subnets: k => v }
+  for_each = { for k, v in module.vpc.intra_subnets : k => v }
 
 
-  name = each.key
-  chart = "${path.module}/helm/eni-config"
-  version = "1.0.0"
+  name      = each.value
+  chart     = "${path.module}/helm/eni-config"
+  version   = "1.0.0"
   namespace = "default"
   set {
-    name = "name"
-    #value = each.key
+    name  = "name"
     value = each.value
-    type = "string"
+    type  = "string"
   }
 
   set {
-    name = "subnet"
+    name  = "subnet"
     value = each.value
-    type = "string"
+    type  = "string"
   }
 
   set {
-    name = "nodeSg"
+    name  = "nodeSg"
     value = module.eks.node_security_group_id
-    type = "string"
+    type  = "string"
   }
 }
+
+resource "helm_release" "pod-sg" {
+  name      = "pod-sg"
+  chart     = "${path.module}/helm/pod-sg"
+  version   = "1.0.0"
+  namespace = "default"
+  set {
+    name  = "name"
+    value = "pod-sg"
+    type  = "string"
+  }
+
+  set {
+    name  = "sgId"
+    value = aws_security_group.example_sg.id
+    type  = "string"
+  }
+
+  values = [
+    <<EOT
+matchLabels:
+  test: "role"
+EOT
+  ]
+}
+
+
 
 # STEP 4: Create managed node group
 # resource "aws_eks_node_group" "default" {
