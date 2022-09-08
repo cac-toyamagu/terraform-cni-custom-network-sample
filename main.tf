@@ -23,10 +23,10 @@ module "vpc" {
   name                  = local.cluster_name
   cidr                  = "10.0.0.0/16"
   secondary_cidr_blocks = ["100.64.0.0/16"]
-  azs                   = ["${local.region}a", "${local.region}c", "${local.region}d"]
-  private_subnets       = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
-  intra_subnets         = ["100.64.1.0/24", "100.64.2.0/24", "100.64.3.0/24"]
-  public_subnets        = ["10.0.4.0/24", "10.0.5.0/24", "10.0.6.0/24"]
+  azs                   = local.vpc.azs
+  private_subnets       = local.vpc.private_subnets
+  intra_subnets         = local.vpc.intra_subnets
+  public_subnets        = local.vpc.public_subnets
   enable_nat_gateway    = true
   single_nat_gateway    = true
   enable_dns_hostnames  = true
@@ -108,23 +108,27 @@ resource "null_resource" "cni_patch" {
   ]
 }
 
+# Create ENI Configs
 resource "helm_release" "eni-config" {
-  for_each = { for k, v in module.vpc.intra_subnets : k => v }
+  for_each = { for i, v in module.vpc.azs : i => {
+    "az"           = v
+    "intra_subnet" = module.vpc.intra_subnets[i]
+    }
+  }
 
-
-  name      = each.value
+  name      = each.value.az
   chart     = "${path.module}/helm/eni-config"
   version   = "1.0.0"
   namespace = "default"
   set {
     name  = "name"
-    value = each.value
+    value = each.value.az
     type  = "string"
   }
 
   set {
     name  = "subnet"
-    value = each.value
+    value = each.value.intra_subnet
     type  = "string"
   }
 
@@ -140,6 +144,7 @@ resource "helm_release" "pod-sg" {
   chart     = "${path.module}/helm/pod-sg"
   version   = "1.0.0"
   namespace = "default"
+
   set {
     name  = "name"
     value = "pod-sg"
